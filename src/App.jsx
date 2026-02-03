@@ -366,7 +366,7 @@ const normalizeName = (name) => {
 
 function parseDate(dateStr) {
   if (!dateStr) return null;
-  // Strip day-of-week suffix like "12/09/2025 Tue" -> "12/09/2025"
+  // Strip day-of-week suffix "12/09/2025 Tue" -> "12/09/2025"
   const cleaned = dateStr.toString().replace(/\s+(Sun|Mon|Tue|Wed|Thu|Fri|Sat).*$/i, '').trim();
   const d = new Date(cleaned);
   return isNaN(d) ? null : d;
