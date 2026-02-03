@@ -619,7 +619,7 @@ export default function W2WAttendanceProcessor() {
     lines.push('', 'Please note that you have 2 weeks after the call-off date to make up your call-off shifts. Let us know if you need an extension.');
     lines.push('', 'To be in good standing is to have at most 3 infraction points. Please also let us know if we make any mistakes or if you have any questions.');
     lines.push('', 'Thank you,', managerName);
-    lines.push('', '---', 'Note: This email was generated using an alpha version of our attendance tracking software. If you notice any mistakes or discrepancies, please let us know by replying to this email.');
+    lines.push('', 'Note: This email was generated using an alpha version of our attendance tracking software. If you notice any mistakes or discrepancies, please let us know by replying to this email.');
 
     return lines.join('\n');
   }, [managerName]);
