@@ -75,15 +75,13 @@ const AttendancePolicyEngine = {
     const hasFinal = commentLower.includes('final');
     
     if (hasPrelim || hasFinal) {
-      if (hasFinal) {
-        return { type: 'Prelim', reason: 'Final exam - excused absence', points: 0 };
-      }
-      if (this.isTuesdayOrThursday(shiftDate) && this.isEveningShift(shiftTime)) {
-        return { type: 'Prelim', reason: 'Prelim exam - excused absence (Tue/Thu evening)', points: 0 };
-      }
+      const reason = hasFinal ? 'Final exam - excused absence' : 'Prelim exam - excused absence';
+      return { type: 'Prelim', reason, points: 0 };
     }
     
-    const isSick = this.sickKeywords.some(kw => commentLower.includes(kw));
+    const isSick = this.sickKeywords.some(kw =>
+      kw.includes(' ') ? commentLower.includes(kw) : new RegExp(`\\b${kw}\\b`).test(commentLower)
+    );
     
     if (isSick) {
       const isWeekendMorning = this.isWeekendMorningShift(shiftDate, shiftTime);
@@ -182,7 +180,7 @@ const W2WParser = {
     
     for (let i = 0; i < matches.length; i++) {
       const m = matches[i];
-      if (skipWords.some(w => m.name.toLowerCase().includes(w))) continue;
+      if (skipWords.some(w => m.name.toLowerCase().split(/\s+/).some(part => part === w))) continue;
       
       const parsedDate = new Date(m.dateStr);
       if (isNaN(parsedDate)) continue;
@@ -198,7 +196,7 @@ const W2WParser = {
       const shiftTime = timeMatch ? timeMatch[1] : '5:15pm - 9:05pm';
       
       let comment = '';
-      const commentMatch = entryText.match(/(?:Published\s+)?(?:\d+\s+)?([A-Za-z][\w\s,'()/-]+?)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d/i);
+      const commentMatch = entryText.match(/(?:Published\s+)?(?:\d+\s+)?([A-Za-z][\w\s,'():/-]+?)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d/i);
       if (commentMatch) {
         comment = commentMatch[1].trim()
           .replace(/Comment to include.*/i, '')
