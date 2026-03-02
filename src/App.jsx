@@ -495,7 +495,11 @@ export default function W2WAttendanceProcessor() {
       const nscData = normalizedNscLog[normName];
       let availableWos = [...(normalizedWos[normName] || [])];
 
-      if (infData.total <= 0) return;
+      // Compute potential infraction points from counts only (before WO deductions).
+      // We can't rely on infData.total because the sheet may have deducted WOs that
+      // were actually outside the 14-day make-up window.
+      const potentialRawPoints = infData.nsc * 1 + infData.nslc * 2 + infData.nsnc * 3 + infData.nsls * 1;
+      if (potentialRawPoints <= 0) return;
 
       const infractions = nscData?.infractions || [];
       const today = new Date();
@@ -581,8 +585,13 @@ export default function W2WAttendanceProcessor() {
         return 0;
       });
 
+      // Compute the actual total after date-based WO matching.
+      // This may differ from infData.total when WOs were outside the 14-day window.
+      const computedTotal = allInfractions.reduce((sum, inf) => sum + inf.points, 0);
+      if (computedTotal <= 0) return;
+
       employeeEmails.push({
-        name: rawName, firstName: getFirstName(rawName), totalPoints: infData.total,
+        name: rawName, firstName: getFirstName(rawName), totalPoints: computedTotal,
         infractions: allInfractions, counts: infData
       });
     });
