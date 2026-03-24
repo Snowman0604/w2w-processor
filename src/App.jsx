@@ -420,6 +420,8 @@ export default function W2WAttendanceProcessor() {
   const [infractionListText, setInfractionListText] = useState('');
   const [woExpirationText, setWoExpirationText] = useState('');
   const [emailData, setEmailData] = useState([]);
+  const [rawEmailData, setRawEmailData] = useState([]);
+  const [showRawData, setShowRawData] = useState(false);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
 
   const processData = useCallback(() => {
@@ -488,6 +490,7 @@ export default function W2WAttendanceProcessor() {
     });
 
     const employeeEmails = [];
+    const allEmployeePoints = [];
 
     Object.keys(infractionList).forEach(rawName => {
       const normName = normalizeName(rawName);
@@ -499,7 +502,10 @@ export default function W2WAttendanceProcessor() {
       // We can't rely on infData.total because the sheet may have deducted WOs that
       // were actually outside the 14-day make-up window.
       const potentialRawPoints = infData.nsc * 1 + infData.nslc * 2 + infData.nsnc * 3 + infData.nsls * 1;
-      if (potentialRawPoints <= 0) return;
+      if (potentialRawPoints <= 0) {
+        allEmployeePoints.push({ name: rawName, totalPoints: potentialRawPoints });
+        return;
+      }
 
       const infractions = nscData?.infractions || [];
       const today = new Date();
@@ -588,6 +594,7 @@ export default function W2WAttendanceProcessor() {
       // Compute the actual total after date-based WO matching.
       // This may differ from infData.total when WOs were outside the 14-day window.
       const computedTotal = allInfractions.reduce((sum, inf) => sum + inf.points, 0);
+      allEmployeePoints.push({ name: rawName, totalPoints: computedTotal });
       if (computedTotal <= 0) return;
 
       employeeEmails.push({
@@ -597,7 +604,9 @@ export default function W2WAttendanceProcessor() {
     });
 
     employeeEmails.sort((a, b) => a.name.localeCompare(b.name));
+    allEmployeePoints.sort((a, b) => a.name.localeCompare(b.name));
     setEmailData(employeeEmails);
+    setRawEmailData(allEmployeePoints);
     if (employeeEmails.length > 0) setSelectedEmployee(employeeEmails[0].name);
   }, [nscLogText, infractionListText, woExpirationText]);
 
@@ -885,6 +894,25 @@ export default function W2WAttendanceProcessor() {
               </div>
               <button onClick={processEmailSheets} disabled={!infractionListText.trim()} className="flex items-center gap-2 px-6 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 text-white rounded-lg"><Mail size={18}/> Generate Emails</button>
             </div>
+
+            {rawEmailData.length > 0 && (
+              <div className="bg-white rounded-xl shadow-lg overflow-hidden">
+                <button onClick={() => setShowRawData(s => !s)} className="w-full flex items-center justify-between px-4 py-3 font-semibold text-sm text-slate-700 hover:bg-slate-50">
+                  <span>RAW DATA <span className="font-normal text-slate-400">({rawEmailData.length} employees)</span></span>
+                  <span className="text-slate-400 text-xs">{showRawData ? '▲ hide' : '▼ show'}</span>
+                </button>
+                {showRawData && (
+                  <div className="border-t px-4 py-3 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-60 overflow-y-auto">
+                    {rawEmailData.map(emp => (
+                      <div key={emp.name} className="flex justify-between items-center text-sm px-2 py-1 rounded bg-slate-50">
+                        <span className="truncate mr-2">{emp.name}</span>
+                        <span className={`shrink-0 font-mono font-semibold ${emp.totalPoints > 0 ? 'text-red-600' : 'text-slate-400'}`}>{emp.totalPoints}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {emailData.length > 0 && (
               <div className="bg-white rounded-xl shadow-lg overflow-hidden">
