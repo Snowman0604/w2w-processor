@@ -437,17 +437,6 @@ export default function W2WAttendanceProcessor() {
     
     processed.sort((a, b) => a.shiftDate - b.shiftDate);
     
-    const infractions = processed.filter(e => ['NS/C', 'NS/LC', 'NS/NC'].includes(e.infraction));
-    const workOffs = processed.filter(e => ['WO', 'WO Host'].includes(e.infraction));
-    
-    infractions.forEach(inf => {
-      const matchingWo = workOffs.find(wo => wo.name === inf.name && !wo.isCancelled && isWithinDays(wo.shiftDate, inf.shiftDate, 14));
-      if (matchingWo) {
-        inf.isCancelled = true;
-        matchingWo.isCancelled = true;
-      }
-    });
-    
     setProcessedEntries(processed);
     setActiveTab('results');
   }, [pickupText, calloffText, nsCWindow, allowAnyDay2Days]);
@@ -719,7 +708,6 @@ export default function W2WAttendanceProcessor() {
       const cell = logSheet.getRange(row, col);
       if (!cell.getValue()) {
         cell.setValue(e.infraction);
-        if (e.isCancelled) cell.setBackground('#FFFF00');
         added++;
       }
     } else {
@@ -758,8 +746,7 @@ export default function W2WAttendanceProcessor() {
     catch (e) { console.error(e); }
   };
 
-  const getInfractionColor = (type, isCancelled) => {
-    if (isCancelled) return 'bg-yellow-200 text-yellow-900';
+  const getInfractionColor = (type) => {
     return { 'NS/C': 'bg-yellow-100 text-yellow-800', 'NS/LC': 'bg-orange-100 text-orange-800',
              'NS/NC': 'bg-red-100 text-red-800', 'NS/S': 'bg-green-100 text-green-800',
              'NS/LS': 'bg-amber-100 text-amber-800', 'WO': 'bg-blue-100 text-blue-800',
@@ -847,8 +834,7 @@ export default function W2WAttendanceProcessor() {
             <div className="flex justify-between items-center mb-4">
               <h2 className="font-semibold">Results ({processedEntries.length})</h2>
               <div className="flex gap-3 text-sm">
-                <span>Net: {processedEntries.filter(e => !e.isCancelled).reduce((s,e) => s + e.points, 0)} pts</span>
-                <span className="bg-yellow-200 px-2 py-0.5 rounded text-xs">Yellow = Matched</span>
+                <span>Net: {processedEntries.reduce((s,e) => s + e.points, 0)} pts</span>
               </div>
             </div>
             {processedEntries.length === 0 ? <p className="text-slate-400 text-center py-12">Process data first</p> : (
@@ -857,11 +843,11 @@ export default function W2WAttendanceProcessor() {
                   <thead><tr className="border-b"><th className="text-left py-2 px-3">Employee</th><th className="text-left py-2 px-3">Date</th><th className="text-left py-2 px-3">Type</th><th className="text-left py-2 px-3">Pts</th></tr></thead>
                   <tbody>
                     {processedEntries.map((e,i) => (
-                      <tr key={i} className={`border-b ${e.isCancelled ? 'bg-yellow-50' : 'hover:bg-slate-50'}`}>
+                      <tr key={i} className={`border-b hover:bg-slate-50`}>
                         <td className="py-2 px-3 font-medium">{e.name}</td>
                         <td className="py-2 px-3">{e.shiftDate.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</td>
-                        <td className="py-2 px-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${getInfractionColor(e.infraction, e.isCancelled)}`}>{e.infraction}</span></td>
-                        <td className="py-2 px-3"><span className={e.isCancelled ? 'line-through text-slate-400' : e.points > 0 ? 'text-red-600' : e.points < 0 ? 'text-green-600' : ''}>{e.points > 0 ? '+' : ''}{e.points}</span></td>
+                        <td className="py-2 px-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${getInfractionColor(e.infraction)}`}>{e.infraction}</span></td>
+                        <td className="py-2 px-3"><span className={e.points > 0 ? 'text-red-600' : e.points < 0 ? 'text-green-600' : ''}>{e.points > 0 ? '+' : ''}{e.points}</span></td>
                       </tr>
                     ))}
                   </tbody>
