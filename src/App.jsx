@@ -701,25 +701,39 @@ export default function W2WAttendanceProcessor() {
   const employeeRows = {};
   nameColumn.forEach((row, i) => { if (row[0]) employeeRows[row[0].trim()] = i + 2; });
   
-  let added = 0, errors = [];
+  const calloffTypes = ['NS/C', 'NS/LC', 'NS/NC', 'NS/S', 'NS/LS'];
+  const replacedWOs = [];
+  let added = 0, updated = 0, errors = [];
   entries.forEach(e => {
     const row = employeeRows[e.name], col = dateColumns[e.date];
     if (row && col) {
       const cell = logSheet.getRange(row, col);
-      if (!cell.getValue()) {
+      const current = cell.getValue();
+      if (!current) {
         cell.setValue(e.infraction);
         added++;
+      } else if (current !== e.infraction && (calloffTypes.includes(e.infraction) && (current === 'WO' || current === 'WO Host'))) {
+        cell.setValue(e.infraction);
+        updated++;
+        replacedWOs.push({ name: e.name, date: e.date });
       }
     } else {
       errors.push((row ? '' : 'Employee: ' + e.name) + (col ? '' : ' Date: ' + e.date));
     }
   });
-  
+
+  // Build a set of calloff name+date combos to skip WO writes for same-batch conflicts
+  const calloffKeys = new Set();
+  entries.forEach(e => {
+    if (calloffTypes.includes(e.infraction)) calloffKeys.add(e.name + '|' + e.date);
+  });
+
   if (woSheet) {
     let fullRow = 3; while (woSheet.getRange(fullRow, 1).getValue()) fullRow++;
     let partialRow = 3; while (woSheet.getRange(partialRow, 7).getValue()) partialRow++;
-    
+
     woExpiration.fullShifts.forEach(wo => {
+      if (calloffKeys.has(wo.name + '|' + wo.woDate)) return;
       const parts = wo.woDate.split('-');
       const dateStr = parseInt(parts[1]) + '/' + parseInt(parts[2]) + '/' + parts[0];
       woSheet.getRange(fullRow, 1).setValue(wo.name);
@@ -728,15 +742,71 @@ export default function W2WAttendanceProcessor() {
     });
 
     woExpiration.partialDoorShifts.forEach(wo => {
+      if (calloffKeys.has(wo.name + '|' + wo.woDate)) return;
       const parts = wo.woDate.split('-');
       const dateStr = parseInt(parts[1]) + '/' + parseInt(parts[2]) + '/' + parts[0];
       woSheet.getRange(partialRow, 7).setValue(wo.name);
       woSheet.getRange(partialRow, 8).setValue(dateStr);
       partialRow++;
     });
+
+    // Remove WO Expiration entries for WOs that were replaced by calloffs, then shift up
+    if (replacedWOs.length > 0) {
+      let removed = 0;
+
+      function normalizeDate(d) {
+        if (!d) return '';
+        if (d instanceof Date) {
+          return (d.getMonth()+1) + '/' + d.getDate() + '/' + d.getFullYear();
+        }
+        var parts = d.toString().split('-');
+        if (parts.length === 3 && parts[0].length === 4) {
+          return parseInt(parts[1]) + '/' + parseInt(parts[2]) + '/' + parts[0];
+        }
+        return d.toString();
+      }
+
+      function isMatch(name, date) {
+        var nd = normalizeDate(date);
+        for (var w = 0; w < replacedWOs.length; w++) {
+          if (name === replacedWOs[w].name && nd === normalizeDate(replacedWOs[w].date)) return true;
+        }
+        return false;
+      }
+
+      // Collect, filter, and rewrite full shifts (columns 1-2)
+      var fullEntries = [];
+      for (var r = 3; woSheet.getRange(r, 1).getValue(); r++) {
+        var name = woSheet.getRange(r, 1).getValue().toString().trim();
+        var date = woSheet.getRange(r, 2).getValue();
+        if (isMatch(name, date)) { removed++; } else { fullEntries.push([name, date]); }
+      }
+      var fullEndRow = r - 1;
+      if (fullEndRow >= 3) woSheet.getRange(3, 1, fullEndRow - 2, 2).clearContent();
+      fullEntries.forEach(function(entry, i) {
+        woSheet.getRange(3 + i, 1).setValue(entry[0]);
+        woSheet.getRange(3 + i, 2).setValue(entry[1]);
+      });
+
+      // Collect, filter, and rewrite partial/door shifts (columns 7-8)
+      var partialEntries = [];
+      for (var r = 3; woSheet.getRange(r, 7).getValue(); r++) {
+        var name = woSheet.getRange(r, 7).getValue().toString().trim();
+        var date = woSheet.getRange(r, 8).getValue();
+        if (isMatch(name, date)) { removed++; } else { partialEntries.push([name, date]); }
+      }
+      var partialEndRow = r - 1;
+      if (partialEndRow >= 3) woSheet.getRange(3, 7, partialEndRow - 2, 2).clearContent();
+      partialEntries.forEach(function(entry, i) {
+        woSheet.getRange(3 + i, 7).setValue(entry[0]);
+        woSheet.getRange(3 + i, 8).setValue(entry[1]);
+      });
+    }
   }
-  
-  SpreadsheetApp.getUi().alert('Added ' + added + ' infractions.\\n' + 
+
+  SpreadsheetApp.getUi().alert('Added ' + added + ' infractions.' +
+    (updated ? '\\nUpdated ' + updated + ' (replaced WO with calloff).' : '') +
+    (typeof removed !== 'undefined' && removed ? '\\nRemoved ' + removed + ' from WO Expiration.' : '') + '\\n' +
     (errors.length ? 'Errors: ' + errors.join(', ') : 'No errors.'));
 }`;
   };
