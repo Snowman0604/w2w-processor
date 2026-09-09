@@ -115,45 +115,119 @@ const AttendancePolicyEngine = {
 
 // Parser for W2W pages
 const W2WParser = {
-  parsePickupPage(text) {
-    const entries = [];
-    const fullText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ');
-    const pickupPattern = /([A-Z][a-z]+\s+[A-Z][a-z'-]+(?:\s+[A-Z][a-z'-]+)?)\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})\s+(\d{1,2}:?\d{0,2}\s*[ap]?m?\s*-\s*\d{1,2}:?\d{0,2}\s*[ap]?m?)\s*([\w\s-]*)/gi;
-    
-    let match;
-    const skipWords = ['unassigned', 'approve', 'reject', 'comment', 'pickup', 'request', 'from', 'through'];
-    
-    while ((match = pickupPattern.exec(fullText)) !== null) {
-      const name = match[1].trim();
-      const dateStr = match[2].trim();
-      const timeStr = match[3].trim();
-      const position = match[4]?.trim().toLowerCase() || '';
+  // Page chrome W2W renders around each request row - never part of a name
+  boilerplateLine: /^(?:home|schedules|employees|trades|time off|messaging|reports|on now|settings|help|signout|approve(?:\s+all)?|reject(?:\s+all)?|deny|clear all|check conflicts|comment to include.*|unassigned pickup requests|trades awaiting approval|recent posts|weekly tradeboard|monthly tradeboard|information|help on this topic|north star dining|shift in past)$/i,
 
-      // Check if name contains skip words - if so, retry from after the first word
-      const nameParts = name.toLowerCase().split(/\s+/);
-      if (nameParts.some(part => skipWords.includes(part) || skipWords.some(w => part.includes(w)))) {
-        // Reset to after the first word so we can try matching the real name
-        pickupPattern.lastIndex = match.index + name.split(/\s+/)[0].length + 1;
+  // Chrome words and position codes that can end up glued in front of a name when the paste wraps
+  stopWords: ['check', 'conflicts', 'approve', 'approval', 'reject', 'deny', 'comment',
+              'unassigned', 'pickup', 'pickups', 'request', 'requests', 'shift', 'past',
+              'trades', 'awaiting', 'clear', 'information', 'recent', 'posts', 'tradeboard',
+              'fsw', 'din', 'host', 'br', 'stu', 'student', 'supe', 'actual'],
+
+  // Name tokens must start with a capital, so lowercase chrome ("conflicts") can't be read as a name
+  namePattern: /[A-Z][A-Za-z'\u2019.-]*(?:\s+[A-Z][A-Za-z'\u2019.-]*){1,3}/,
+  datePattern: /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}/,
+  timePattern: /\d{1,2}(?::\d{2})?\s*[ap]\.?m?\.?\s*-\s*\d{1,2}(?::\d{2})?\s*[ap]\.?m?\.?/,
+  separator: /\s+/,
+
+  cleanLines(text) {
+    return text
+      .replace(/\r/g, '')
+      .split('\n')
+      .map(line => line.replace(/\t/g, ' ').replace(/\s+/g, ' ').trim())
+      .filter(line => line && !this.boilerplateLine.test(line));
+  },
+
+  // Everything after the shift time is the position, up to the row's buttons/notes
+  cleanPosition(rest) {
+    return (rest || '')
+      .replace(/\b(?:Approve|Reject|Deny|Comment to include|Check conflicts|Shift in past)\b.*$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+
+  startsWithStopWord(name) {
+    const first = name.trim().split(/\s+/)[0].toLowerCase();
+    return this.stopWords.includes(first);
+  },
+
+  buildPickupEntry(name, dateStr, timeStr, rest, rawText) {
+    const shiftDate = new Date(dateStr.trim());
+    if (isNaN(shiftDate)) return null;
+    const position = this.cleanPosition(rest);
+
+    return {
+      name: this.formatName(name.trim()),
+      shiftDate,
+      shiftTime: timeStr.replace(/\s+/g, ' ').trim(),
+      requestedDate: new Date(),
+      comment: 'Shift pickup',
+      isPickup: true,
+      isHostShift: /\b(?:host|door)\b/i.test(position),
+      rawText
+    };
+  },
+
+  // Name | Date | Time | Position, composed from the pieces above
+  buildRowPattern(prefix, tail, flags) {
+    const sep = this.separator.source;
+    return new RegExp(
+      `${prefix}(${this.namePattern.source})${sep}(${this.datePattern.source})${sep}` +
+      `(${this.timePattern.source})${tail.source}`,
+      flags
+    );
+  },
+
+  parsePickupPage(text) {
+    const lines = this.cleanLines(text);
+    const rowPattern = this.buildRowPattern('^', /\s*(.*)$/, '');
+
+    const entries = [];
+    for (const line of lines) {
+      // Each request is one table row: Name | Date | Time | Position
+      let candidate = line;
+      for (let attempt = 0; attempt < 5 && candidate; attempt++) {
+        const match = candidate.match(rowPattern);
+        if (!match) break;
+        if (this.startsWithStopWord(match[1])) {
+          candidate = candidate.replace(/^\S+\s+/, '');
+          continue;
+        }
+        const entry = this.buildPickupEntry(match[1], match[2], match[3], match[4], line);
+        if (entry) entries.push(entry);
+        break;
+      }
+    }
+
+    if (entries.length > 0) return entries;
+    // Fall back to a flat scan for pastes where a row wraps across several lines
+    return this.parsePickupBlob(lines);
+  },
+
+  parsePickupBlob(lines) {
+    const fullText = lines.join(' ');
+    const pickupPattern = this.buildRowPattern('', /(?:)/, 'g');
+
+    const rows = [];
+    let match;
+    while ((match = pickupPattern.exec(fullText)) !== null) {
+      if (this.startsWithStopWord(match[1])) {
+        // Retry from just after the offending word so the real name can match
+        pickupPattern.lastIndex = match.index + match[1].split(/\s+/)[0].length + 1;
         continue;
       }
-      
-      const parsedDate = new Date(dateStr);
-      if (isNaN(parsedDate)) continue;
-      
-      const isHostShift = position.includes('host') || position.includes('door');
-      
-      entries.push({
-        name: this.formatName(name),
-        shiftDate: parsedDate,
-        shiftTime: timeStr,
-        requestedDate: new Date(),
-        comment: 'Shift pickup',
-        isPickup: true,
-        isHostShift: isHostShift,
-        rawText: match[0]
-      });
+      rows.push({ match, start: match.index, end: match.index + match[0].length });
     }
-    
+
+    // The position sits between the end of a row and the start of the next one
+    const entries = [];
+    rows.forEach((row, i) => {
+      const stop = Math.min(rows[i + 1] ? rows[i + 1].start : fullText.length, row.end + 60);
+      const rest = fullText.substring(row.end, stop);
+      const entry = this.buildPickupEntry(row.match[1], row.match[2], row.match[3], rest, row.match[0] + rest);
+      if (entry) entries.push(entry);
+    });
+
     return entries;
   },
   
