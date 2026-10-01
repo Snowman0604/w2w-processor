@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { Calendar, User, FileText, Copy, Download, Upload, RefreshCw, Info, Settings, Mail, Link2, ClipboardList } from 'lucide-react';
+import { Calendar, User, FileText, Copy, Download, Upload, RefreshCw, Info, Settings, Mail, Link2, ClipboardList, Thermometer, AlertTriangle } from 'lucide-react';
 
 // Attendance Policy Rules Engine
 const AttendancePolicyEngine = {
@@ -479,6 +479,52 @@ function getInfractionPoints(type) {
   return { 'NS/C': 1, 'NS/LC': 2, 'NS/NC': 3, 'NS/S': 0, 'NS/LS': 1 }[type] || 0;
 }
 
+const SICK_TYPES = ['NS/S', 'NS/LS'];
+const SICK_WINDOW_DAYS = 14;
+const SICK_CALLOFF_THRESHOLD = 3;
+
+// Finds everyone with sick call-offs and flags anyone with 3+ inside any 14-day window
+function analyzeSickLeave(nscLog, sickTypes) {
+  const DAY_MS = 1000 * 60 * 60 * 24;
+  const results = [];
+
+  Object.values(nscLog.employees).forEach(emp => {
+    const calloffs = emp.infractions
+      .filter(inf => sickTypes.includes(inf.type))
+      .map(inf => {
+        const d = parseDate(inf.date);
+        if (d) d.setHours(0, 0, 0, 0);
+        return { ...inf, parsed: d };
+      })
+      .filter(inf => inf.parsed)
+      .sort((a, b) => a.parsed - b.parsed);
+    if (calloffs.length === 0) return;
+
+    // Slide over sorted dates: first and last of N consecutive call-offs fall in the same 14-day span
+    const flaggedIdx = new Set();
+    const windows = [];
+    const n = SICK_CALLOFF_THRESHOLD;
+    for (let i = 0; i + n - 1 < calloffs.length; i++) {
+      const spanDays = Math.round((calloffs[i + n - 1].parsed - calloffs[i].parsed) / DAY_MS);
+      if (spanDays < SICK_WINDOW_DAYS) {
+        for (let k = i; k < i + n; k++) flaggedIdx.add(k);
+        windows.push({ start: calloffs[i].date, end: calloffs[i + n - 1].date });
+      }
+    }
+
+    results.push({
+      name: emp.name,
+      calloffs: calloffs.map((c, i) => ({ date: c.date, type: c.type, inWindow: flaggedIdx.has(i) })),
+      windows,
+      flagged: windows.length > 0
+    });
+  });
+
+  // Flagged employees first, then alphabetical
+  results.sort((a, b) => (b.flagged - a.flagged) || a.name.localeCompare(b.name));
+  return results;
+}
+
 export default function W2WAttendanceProcessor() {
   const [pickupText, setPickupText] = useState('');
   const [calloffText, setCalloffText] = useState('');
@@ -497,6 +543,18 @@ export default function W2WAttendanceProcessor() {
   const [rawEmailData, setRawEmailData] = useState([]);
   const [showRawData, setShowRawData] = useState(false);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
+  const [includeLateSick, setIncludeLateSick] = useState(true);
+  const [sickFlaggedOnly, setSickFlaggedOnly] = useState(false);
+
+  const sickLeaveData = useMemo(() => {
+    if (!nscLogText.trim()) return [];
+    const types = includeLateSick ? SICK_TYPES : ['NS/S'];
+    return analyzeSickLeave(SheetParser.parseNSCLog(nscLogText), types);
+  }, [nscLogText, includeLateSick]);
+
+  const [selectedSickEmployee, setSelectedSickEmployee] = useState(null);
+  const flaggedSickEmployees = sickLeaveData.filter(e => e.flagged);
+  const selectedSickData = flaggedSickEmployees.find(e => e.name === selectedSickEmployee) || flaggedSickEmployees[0];
 
   const processData = useCallback(() => {
     const allEntries = [];
@@ -699,6 +757,24 @@ export default function W2WAttendanceProcessor() {
     lines.push('', 'To be in good standing is to have at most 3 infraction points. Please also let us know if we make any mistakes or if you have any questions.');
     lines.push('', 'Thank you,', managerName);
     lines.push('', 'Note: This email was generated using an alpha version of our attendance tracking software. If you notice any mistakes or discrepancies, please let us know by replying to this email.');
+
+    return lines.join('\n');
+  }, [managerName]);
+
+  const generateSickEmail = useCallback((employee) => {
+    if (!employee) return '';
+
+    const lines = [
+      `Hi ${getFirstName(employee.name)},`,
+      '',
+      'Our records show that you have called off sick for at least two weeks and have not worked a shift during that time. Your sick call-offs were on:',
+      ''
+    ];
+    employee.calloffs.filter(c => c.inWindow).forEach(c => lines.push(`    ${formatDateShort(c.date)}`));
+
+    lines.push('', 'Under the handbook policy, we require a medical release note from your doctor before we can add you back to the schedule. We are concerned about your health, and unfortunately we will have to remove you from the schedule until you provide the required documentation. We will place you back on the schedule once we receive it.');
+    lines.push('', 'Please let us know if you have any questions or if we have made a mistake.');
+    lines.push('', 'Thank you,', managerName);
 
     return lines.join('\n');
   }, [managerName]);
@@ -944,11 +1020,11 @@ export default function W2WAttendanceProcessor() {
         </div>
 
         <div className="flex gap-2 mb-4 flex-wrap">
-          {['input', 'results', 'export', 'emails'].map(tab => (
+          {['input', 'results', 'export', 'emails', 'sick'].map(tab => (
             <button key={tab} onClick={() => setActiveTab(tab)}
               className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 ${activeTab === tab ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
-              {tab === 'emails' ? <Mail size={16}/> : tab === 'input' ? <Upload size={16}/> : tab === 'results' ? <FileText size={16}/> : <Settings size={16}/>}
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {tab === 'emails' ? <Mail size={16}/> : tab === 'sick' ? <Thermometer size={16}/> : tab === 'input' ? <Upload size={16}/> : tab === 'results' ? <FileText size={16}/> : <Settings size={16}/>}
+              {tab === 'sick' ? 'Sick Leave Analyzer' : tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
           ))}
         </div>
@@ -1065,6 +1141,97 @@ export default function W2WAttendanceProcessor() {
                     </div>
                     <div className="flex-1 overflow-y-auto p-4">
                       {selectedEmployeeData ? <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">{generateEmail(selectedEmployeeData)}</pre> : <p className="text-slate-400 text-center py-8">Select an employee</p>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'sick' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h2 className="font-semibold mb-1 flex items-center gap-2"><Thermometer size={18} className="text-rose-600"/> Sick Leave Analyzer</h2>
+              <p className="text-sm text-slate-500 mb-4">Flags anyone with {SICK_CALLOFF_THRESHOLD}+ sick call-offs within any {SICK_WINDOW_DAYS}-day period. Request a doctor's note stating when they can return.</p>
+              <label className="block text-sm font-medium mb-1">NS-C Log <span className="font-normal text-slate-400">(shared with the Emails tab)</span></label>
+              <textarea value={nscLogText} onChange={e => setNscLogText(e.target.value)} placeholder="Paste NS-C Log..." className="w-full h-28 p-2 border rounded-lg font-mono text-xs mb-3"/>
+              <div className="flex flex-wrap gap-4 text-sm">
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={includeLateSick} onChange={e => setIncludeLateSick(e.target.checked)} />
+                  Count late sick calls (NS/LS) too
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={sickFlaggedOnly} onChange={e => setSickFlaggedOnly(e.target.checked)} />
+                  Show flagged only
+                </label>
+              </div>
+            </div>
+
+            {nscLogText.trim() && (
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
+                  <h2 className="font-semibold">Sick Call-offs ({sickLeaveData.length} employees)</h2>
+                  <span className="text-sm text-rose-700 font-medium">{sickLeaveData.filter(e => e.flagged).length} flagged</span>
+                </div>
+                {sickLeaveData.length === 0 ? <p className="text-slate-400 text-center py-12">No sick call-offs found in the NS-C Log</p> : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead><tr className="border-b"><th className="text-left py-2 px-3">Employee</th><th className="text-left py-2 px-3">Count</th><th className="text-left py-2 px-3">Sick Call-off Dates</th><th className="text-left py-2 px-3">Status</th></tr></thead>
+                      <tbody>
+                        {sickLeaveData.filter(e => !sickFlaggedOnly || e.flagged).map(emp => (
+                          <tr key={emp.name} className={`border-b align-top ${emp.flagged ? 'bg-rose-50' : 'hover:bg-slate-50'}`}>
+                            <td className="py-2 px-3 font-medium">{emp.name}</td>
+                            <td className="py-2 px-3">{emp.calloffs.length}</td>
+                            <td className="py-2 px-3">
+                              <div className="flex flex-wrap gap-1">
+                                {emp.calloffs.map((c, i) => (
+                                  <span key={i} title={getInfractionDisplayName(c.type)} className={`px-2 py-0.5 rounded-full text-xs font-semibold ${c.inWindow ? 'bg-rose-200 text-rose-900' : getInfractionColor(c.type)}`}>
+                                    {formatDateShort(c.date)}{c.type !== 'NS/S' ? ` (${c.type})` : ''}
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="py-2 px-3">
+                              {emp.flagged ? (
+                                <div>
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-600 text-white whitespace-nowrap"><AlertTriangle size={12}/> Potential 3 shifts called off in a row</span>
+                                  <div className="text-xs text-slate-500 mt-1">
+                                    {emp.windows.map((w, i) => <div key={i}>{formatDateShort(w.start)} – {formatDateShort(w.end)}</div>)}
+                                  </div>
+                                </div>
+                              ) : <span className="text-slate-400 text-xs">OK</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {flaggedSickEmployees.length > 0 && (
+              <div className="bg-white rounded-xl shadow-lg overflow-hidden">
+                <div className="flex h-96">
+                  <div className="w-1/3 border-r flex flex-col min-w-0">
+                    <div className="bg-slate-100 px-4 py-2 font-semibold text-sm border-b shrink-0">Flagged ({flaggedSickEmployees.length})</div>
+                    <div className="overflow-y-auto flex-1">
+                      {flaggedSickEmployees.map(emp => (
+                        <button key={emp.name} onClick={() => setSelectedSickEmployee(emp.name)} className={`w-full text-left px-4 py-3 border-b flex justify-between items-center hover:bg-slate-50 ${selectedSickData?.name === emp.name ? 'bg-rose-50 border-l-4 border-l-rose-600' : ''}`}>
+                          <span className="font-medium">{emp.name}</span>
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">{emp.calloffs.length} sick</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="w-2/3 flex flex-col min-w-0">
+                    <div className="bg-slate-100 px-4 py-2 font-semibold text-sm border-b flex justify-between items-center shrink-0">
+                      <span>Medical Release Email</span>
+                      {selectedSickData && <button onClick={() => copyToClipboard(generateSickEmail(selectedSickData), 'sickEmail')} className="flex items-center gap-1 px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white text-xs rounded"><Copy size={12}/> {copySuccess === 'sickEmail' ? 'Copied!' : 'Copy'}</button>}
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4">
+                      <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">{generateSickEmail(selectedSickData)}</pre>
                     </div>
                   </div>
                 </div>
