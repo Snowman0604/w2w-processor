@@ -59,6 +59,7 @@ const AttendancePolicyEngine = {
     const { shiftDate, shiftTime, requestedDate, comment, isPickup, isHostShift } = entry;
     const nsCWindow = typeof options.nsCWindow === 'number' ? options.nsCWindow : 48;
     const allowAnyDay2Days = !!options.allowAnyDay2Days;
+    const morrisonMode = !!options.morrisonMode;
 
     if (isPickup) {
       return {
@@ -71,10 +72,11 @@ const AttendancePolicyEngine = {
     const commentLower = (comment || '').toLowerCase();
     const hoursNotice = this.calculateHoursNotice(requestedDate, shiftDate, shiftTime);
     
-    const hasPrelim = this.academicKeywords.some(kw => commentLower.includes(kw));
-    const hasFinal = commentLower.includes('final');
+    const hasPrelim = this.academicKeywords.some(kw => new RegExp(`\\b${kw}\\b`).test(commentLower));
+    const hasFinal = /\bfinals?\b/.test(commentLower);
     
-    if (hasPrelim || hasFinal) {
+    // Morrison Toggle: no exam excusal - exam call-offs fall through to the sick and notice rules
+    if ((hasPrelim || hasFinal) && !morrisonMode) {
       const reason = hasFinal ? 'Final exam - excused absence' : 'Prelim exam - excused absence';
       return { type: 'Prelim', reason, points: 0 };
     }
@@ -288,7 +290,12 @@ const W2WParser = {
         const ampm = reqMatch[5].toLowerCase();
         if (ampm === 'p' && hour !== 12) hour += 12;
         if (ampm === 'a' && hour === 12) hour = 0;
-        requestedDate = new Date(2026, monthIndex, parseInt(reqMatch[2]), hour, minute);
+        // W2W omits the year - take the shift's year, rolling back one if that puts the request months after the shift
+        const shiftYear = parsedDate.getFullYear();
+        requestedDate = new Date(shiftYear, monthIndex, parseInt(reqMatch[2]), hour, minute);
+        if (requestedDate - parsedDate > 180 * 24 * 60 * 60 * 1000) {
+          requestedDate = new Date(shiftYear - 1, monthIndex, parseInt(reqMatch[2]), hour, minute);
+        }
       }
       
       entries.push({
@@ -535,6 +542,7 @@ export default function W2WAttendanceProcessor() {
   const [managerName, setManagerName] = useState('MANAGER');
   const [nsCWindow, setNsCWindow] = useState(48);
   const [allowAnyDay2Days, setAllowAnyDay2Days] = useState(false);
+  const [morrisonMode, setMorrisonMode] = useState(false);
 
   const [nscLogText, setNscLogText] = useState('');
   const [infractionListText, setInfractionListText] = useState('');
@@ -562,7 +570,7 @@ export default function W2WAttendanceProcessor() {
     if (calloffText.trim()) allEntries.push(...W2WParser.parseCalloffPage(calloffText));
     
     const processed = allEntries.map((entry, idx) => {
-      const infraction = AttendancePolicyEngine.determineInfractionType(entry, { nsCWindow, allowAnyDay2Days });
+      const infraction = AttendancePolicyEngine.determineInfractionType(entry, { nsCWindow, allowAnyDay2Days, morrisonMode });
       return { ...entry, id: idx, infraction: infraction.type, reason: infraction.reason, 
                points: infraction.points, isCancelled: false };
     });
@@ -571,7 +579,7 @@ export default function W2WAttendanceProcessor() {
     
     setProcessedEntries(processed);
     setActiveTab('results');
-  }, [pickupText, calloffText, nsCWindow, allowAnyDay2Days]);
+  }, [pickupText, calloffText, nsCWindow, allowAnyDay2Days, morrisonMode]);
 
   const processEmailSheets = useCallback(() => {
     const nscLog = SheetParser.parseNSCLog(nscLogText);
@@ -1013,6 +1021,10 @@ export default function W2WAttendanceProcessor() {
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={allowAnyDay2Days} onChange={e => setAllowAnyDay2Days(e.target.checked)} />
             Allow all call-offs to be made up within 2 days
+          </label>
+          <label className="flex items-center gap-2 text-sm" title="Turns off prelim excusals - all prelim/exam call-offs are recorded as NS/C">
+            <input type="checkbox" checked={morrisonMode} onChange={e => setMorrisonMode(e.target.checked)} />
+            Morrison Toggle (prelims count as NS/C)
           </label>
           <label className="flex items-center gap-2 text-sm">
             Manager: <input type="text" value={managerName} onChange={e => setManagerName(e.target.value)} className="px-2 py-1 border rounded w-24" />
