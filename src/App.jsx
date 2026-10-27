@@ -64,8 +64,8 @@ const AttendancePolicyEngine = {
     if (isPickup) {
       return {
         type: isHostShift ? 'WO Host' : 'WO',
-        reason: isHostShift ? 'Door shift covered' : 'Shift covered by another employee',
-        points: -1
+        reason: isHostShift ? 'Door shift covered (half of a host WO)' : 'Shift covered by another employee',
+        points: isHostShift ? -1 / WOPolicy.HALVES_PER_HOST_WO : -1
       };
     }
     
@@ -486,6 +486,47 @@ function getInfractionPoints(type) {
   return { 'NS/C': 1, 'NS/LC': 2, 'NS/NC': 3, 'NS/S': 0, 'NS/LS': 1 }[type] || 0;
 }
 
+// Make-up (WO) rules shared by the W2W processor and the email generator
+const WOPolicy = {
+  HOST_CAP: 3,           // At most 3 host WOs count toward infraction points; regular WOs are uncapped
+  HALVES_PER_HOST_WO: 2, // A door pickup is half a host shift; any two halves make one host WO
+  WINDOW_DAYS: 14,
+
+  // Same-day door pickups for one person are a full host shift; a lone pickup is a half
+  splitHostPickups(pickups, keyOf) {
+    const byKey = {};
+    pickups.forEach(p => {
+      const key = keyOf(p);
+      if (!byKey[key]) byKey[key] = [];
+      byKey[key].push(p);
+    });
+    const full = [], halves = [];
+    Object.values(byKey).forEach(group => {
+      if (group.length >= this.HALVES_PER_HOST_WO) full.push(group[0]);
+      else halves.push(...group);
+    });
+    return { full, halves };
+  },
+
+  // Pairs halves oldest-first (any days); each pair is a host WO dated by the half that completes it.
+  // Two halves on the same day therefore make one WO, never two.
+  pairHalves(halfDates) {
+    const sorted = halfDates.filter(d => parseDate(d)).sort((a, b) => parseDate(a) - parseDate(b));
+    const paired = [];
+    for (let i = this.HALVES_PER_HOST_WO - 1; i < sorted.length; i += this.HALVES_PER_HOST_WO) paired.push(sorted[i]);
+    return paired;
+  },
+
+  // Removes and returns the first WO in pool that fits; host WOs stop counting once HOST_CAP are used
+  take(pool, state, fits = () => true) {
+    const i = pool.findIndex(wo => fits(wo) && (!wo.isHost || state.hostUsed < this.HOST_CAP));
+    if (i === -1) return null;
+    const [wo] = pool.splice(i, 1);
+    if (wo.isHost) state.hostUsed++;
+    return wo;
+  }
+};
+
 const SICK_TYPES = ['NS/S', 'NS/LS'];
 const SICK_WINDOW_DAYS = 14;
 const SICK_CALLOFF_THRESHOLD = 3;
@@ -586,36 +627,53 @@ export default function W2WAttendanceProcessor() {
     const infractionList = SheetParser.parseInfractionList(infractionListText);
     const woExpiration = SheetParser.parseWOExpiration(woExpirationText);
 
-    // Create normalized lookups to handle name variations
+    // Create normalized lookups to handle name variations.
+    // Each WO is { woDate, isHost } so WOPolicy can apply the host cap.
     const normalizedWos = {};
-    // Add WOs from WO Expiration sheet
-    [...woExpiration.fullShifts, ...woExpiration.partialShifts].forEach(wo => {
-      const norm = normalizeName(wo.name);
+    const addWo = (norm, wo) => {
       if (!normalizedWos[norm]) normalizedWos[norm] = [];
       normalizedWos[norm].push(wo);
+    };
+    const dayKey = (dateStr) => {
+      const d = parseDate(dateStr);
+      return d ? d.setHours(0, 0, 0, 0) : null;
+    };
+    // Every WO Expiration date per person, so the same shift in the NS-C Log isn't counted twice
+    const sheetWoDays = {};
+    const noteSheetDay = (norm, dateStr) => {
+      if (!sheetWoDays[norm]) sheetWoDays[norm] = new Set();
+      sheetWoDays[norm].add(dayKey(dateStr));
+    };
+
+    // Full shifts from WO Expiration; "(HOST)" marks a full host shift
+    woExpiration.fullShifts.forEach(wo => {
+      const norm = normalizeName(wo.name);
+      noteSheetDay(norm, wo.woDate);
+      addWo(norm, { woDate: wo.woDate, isHost: /\(host\)/i.test(wo.name) });
+    });
+
+    // Partial (half) host shifts only count once paired
+    const halvesByName = {};
+    woExpiration.partialShifts.forEach(wo => {
+      const norm = normalizeName(wo.name);
+      noteSheetDay(norm, wo.woDate);
+      if (!halvesByName[norm]) halvesByName[norm] = [];
+      halvesByName[norm].push(wo.woDate);
+    });
+    Object.entries(halvesByName).forEach(([norm, dates]) => {
+      WOPolicy.pairHalves(dates).forEach(woDate => addWo(norm, { woDate, isHost: true }));
     });
 
     const normalizedNscLog = {};
     Object.keys(nscLog.employees).forEach(n => {
       const norm = normalizeName(n);
       normalizedNscLog[norm] = nscLog.employees[n];
-      // Also add WO dates from NS-C Log (may not be in WO Expiration sheet)
-      if (nscLog.employees[n].woDates) {
-        if (!normalizedWos[norm]) normalizedWos[norm] = [];
-        nscLog.employees[n].woDates.forEach(wo => {
-          // Avoid duplicates - check if this date already exists
-          const woDateParsed = parseDate(wo.date);
-          if (!woDateParsed) return;
-          const exists = normalizedWos[norm].some(existing => {
-            const existingParsed = parseDate(existing.woDate);
-            if (!existingParsed) return false;
-            return woDateParsed.setHours(0,0,0,0) === existingParsed.setHours(0,0,0,0);
-          });
-          if (!exists) {
-            normalizedWos[norm].push({ name: n, woDate: wo.date });
-          }
-        });
-      }
+      // Also add WO dates from NS-C Log (may not be in WO Expiration sheet); 'WO Host' there is a full host shift
+      (nscLog.employees[n].woDates || []).forEach(wo => {
+        const key = dayKey(wo.date);
+        if (key === null || sheetWoDays[norm]?.has(key)) return;
+        addWo(norm, { woDate: wo.date, isHost: wo.type === 'WO Host' });
+      });
     });
 
     const employeeEmails = [];
@@ -625,7 +683,10 @@ export default function W2WAttendanceProcessor() {
       const normName = normalizeName(rawName);
       const infData = infractionList[rawName];
       const nscData = normalizedNscLog[normName];
-      let availableWos = [...(normalizedWos[normName] || [])];
+      // Oldest first, so the earliest WOs are matched (and count toward the host cap) first
+      const availableWos = [...(normalizedWos[normName] || [])]
+        .sort((a, b) => parseDate(a.woDate) - parseDate(b.woDate));
+      const woState = { hostUsed: 0 };
 
       // Compute potential infraction points from counts only (before WO deductions).
       // We can't rely on infData.total because the sheet may have deducted WOs that
@@ -670,12 +731,12 @@ export default function W2WAttendanceProcessor() {
         let status = '';
 
         if (pts > 0) {
-          const woIndex = availableWos.findIndex(wo => isWithinDays(wo.woDate, inf.date, 14));
+          const wo = WOPolicy.take(availableWos, woState,
+            wo => isWithinDays(wo.woDate, inf.date, WOPolicy.WINDOW_DAYS));
 
-          if (woIndex !== -1) {
+          if (wo) {
             status = ' (already made up)';
             pts = Math.max(0, pts - 1);
-            availableWos.splice(woIndex, 1);
           } else if (twoWeeksAfter && today > twoWeeksAfter) {
             status = ' (can no longer make up at this time)';
           }
@@ -692,10 +753,9 @@ export default function W2WAttendanceProcessor() {
 
           if (basePts > 0) {
             // Try to match with remaining WOs (these would be older, already expired make-up windows)
-            if (availableWos.length > 0) {
+            if (WOPolicy.take(availableWos, woState)) {
               status = ' (already made up)';
               pts = Math.max(0, pts - 1);
-              availableWos.shift(); // Use oldest WO first
             } else {
               // No WO and no date means it's historical and can no longer be made up
               status = ' (can no longer make up at this time)';
@@ -788,43 +848,25 @@ export default function W2WAttendanceProcessor() {
   }, [managerName]);
 
   const woExpirationEntries = useMemo(() => {
-    const woEntries = processedEntries.filter(e => ['WO', 'WO Host'].includes(e.infraction));
-    const hostByDate = {};
-    woEntries.filter(e => e.infraction === 'WO Host').forEach(e => {
-      const key = `${e.name}|${e.shiftDate.toISOString().split('T')[0]}`;
-      if (!hostByDate[key]) hostByDate[key] = [];
-      hostByDate[key].push(e);
-    });
-    
-    const fullShifts = [], partialDoorShifts = [], processedKeys = new Set();
-    
-    woEntries.forEach(e => {
-      const woDate = new Date(e.shiftDate);
-      const entry = { name: e.name, woDate, isCancelled: e.isCancelled };
-      
-      if (e.infraction === 'WO') {
-        fullShifts.push(entry);
-      } else {
-        const key = `${e.name}|${e.shiftDate.toISOString().split('T')[0]}`;
-        if (hostByDate[key]?.length >= 2) {
-          if (!processedKeys.has(key)) {
-            entry.displayName = `${e.name} (HOST)`;
-            fullShifts.push(entry);
-            processedKeys.add(key);
-          }
-        } else {
-          partialDoorShifts.push(entry);
-        }
-      }
-    });
-    
-    return { fullShifts, partialDoorShifts };
+    const toEntry = e => ({ name: e.name, woDate: new Date(e.shiftDate), isCancelled: e.isCancelled });
+    const { full, halves } = WOPolicy.splitHostPickups(
+      processedEntries.filter(e => e.infraction === 'WO Host'),
+      e => `${e.name}|${e.shiftDate.toISOString().split('T')[0]}`
+    );
+
+    const fullShifts = [
+      ...processedEntries.filter(e => e.infraction === 'WO').map(toEntry),
+      ...full.map(e => ({ ...toEntry(e), displayName: `${e.name} (HOST)` }))
+    ].sort((a, b) => a.woDate - b.woDate);
+
+    // halfEntries: lone door pickups, which go only to WO Expiration's partial column, never the NS-C Log
+    return { fullShifts, partialDoorShifts: halves.map(toEntry), halfEntries: new Set(halves) };
   }, [processedEntries]);
 
   const generateGoogleSheetsScript = () => {
     if (processedEntries.length === 0) return '';
     
-    const entries = processedEntries.map(e => ({
+    const entries = processedEntries.filter(e => !woExpirationEntries.halfEntries.has(e)).map(e => ({
       name: e.name, date: e.shiftDate.toISOString().split('T')[0], infraction: e.infraction, isCancelled: e.isCancelled
     }));
     
